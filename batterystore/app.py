@@ -34,6 +34,7 @@ from .rack.mapping import RackMapping
 from .rack.pack import Pack
 from .rack.rack import Rack
 from .soc.soc import SocEstimator
+from .spares.ledger import POOLED_STATION, SparesLedger
 from .store.journal import JsonlJournal
 from .store.jsonfile import JsonStore
 from .temp.temp import TempControl
@@ -106,6 +107,12 @@ class Platform:
         self.soc = SocEstimator(self.config.soc, self.bms.calibration)
         self.balancer = Balancer(self.config.balance)
         self.quota = QuotaLedger(self.config.quota)
+        self.spares = SparesLedger(
+            self.clock,
+            self.config.spares,
+            JsonlJournal(store.root, "spares", segment_limit=512),
+            DEFAULT_STATION,
+        )
 
         self._cycles = 0
         self._operations = 0
@@ -130,6 +137,7 @@ class Platform:
             ("station", "soc", "state-of-charge"),
             ("station", "balance", "cell-balancer"),
             ("station", "quota", "quota-ledger"),
+            ("station", "spares", "spares-ledger"),
             ("station", "audit", "run-audit"),
         ):
             self.namespaces.register(area, device, kind)
@@ -660,6 +668,201 @@ class Platform:
             routed.extend(self.bms.alarm_report(rack, self.mapping, self.config.bms.ready_delta_mv))
         return routed
 
+    def _spares_event(self, action: str, severity: str, message: str, **payload: object) -> None:
+        """把备件台账动作发成审计事件。"""
+
+        station = str(payload.pop("station", self.station))
+        self.bus.publish(
+            Event.of(
+                "spares",
+                "spares",
+                action,
+                station=station,
+                severity=severity,
+                message=message,
+                **payload,
+            )
+        )
+
+    def spares_register_part(
+        self,
+        part_id: str,
+        name: str | None = None,
+        unit: str = "件",
+        initial_stock: float = 0.0,
+        station: str | None = None,
+    ) -> dict:
+        """登记备件目录（可带期初库存）。"""
+
+        with self._lock:
+            result = self.spares.register_part(part_id, name, unit, initial_stock, station)
+            self._spares_event(
+                "part_registered",
+                "notice",
+                f"登记备件 {part_id}",
+                part_id=part_id,
+                station=result["station"],
+                initial_stock=result["initial_stock"],
+            )
+            return result
+
+    def spares_record_replacement(
+        self,
+        part_id: str,
+        qty: float = 1.0,
+        station: str | None = None,
+        ts: float | None = None,
+        backfilled: bool | None = None,
+        note: str = "",
+    ) -> dict:
+        """登记一次更换消耗；补录登记后建议会自动按全量记录重算。"""
+
+        with self._lock:
+            result = self.spares.record_replacement(part_id, qty, station, ts, backfilled, note)
+            event = result["event"]
+            severity = "warning" if result["backfilled"] else "notice"
+            self._spares_event(
+                "replacement_backfilled" if result["backfilled"] else "replacement_recorded",
+                severity,
+                (
+                    f"补录备件 {part_id} 更换 {event['qty']:g}{'，建议已重算' if result['backfilled'] else ''}"
+                    if result["backfilled"]
+                    else f"登记备件 {part_id} 更换 {event['qty']:g}"
+                ),
+                part_id=part_id,
+                station=event["station"],
+                qty=event["qty"],
+                backfilled=result["backfilled"],
+                on_hand=result["stock"]["on_hand"],
+            )
+            return result
+
+    def spares_set_stock(self, part_id: str, qty: float, station: str | None = None) -> dict:
+        """登记或调整某站备件期初库存（盘点基线）。"""
+
+        with self._lock:
+            result = self.spares.set_initial_stock(part_id, qty, station)
+            self._spares_event(
+                "stock_baseline_set",
+                "notice",
+                f"备件 {part_id} 在 {result['station']} 的期初库存登记为 {qty:g}",
+                part_id=part_id,
+                station=result["station"],
+                qty=float(qty),
+            )
+            return result
+
+    def spares_set_basis(self, part_id: str, basis: str) -> dict:
+        """强制某备件的估计口径，或恢复自动切换。"""
+
+        with self._lock:
+            result = self.spares.set_basis(part_id, basis)
+            self._spares_event(
+                "basis_overridden", "notice", f"备件 {part_id} 估计口径切换为 {basis}", part_id=part_id, basis=basis
+            )
+            return result
+
+    def spares_recommend(self, part_id: str, station: str | None = None, lead_time_days: float | None = None) -> dict:
+        """即时返回最低库存与补货建议（补录后调用即重算结果）。"""
+
+        with self._lock:
+            return self.spares.recommend(part_id, station, lead_time_days)
+
+    def spares_rate(self, part_id: str, station: str | None = None) -> dict:
+        """返回两种口径的速率与自动选口依据。"""
+
+        with self._lock:
+            return self.spares.rate_estimate(part_id, station).as_dict()
+
+    def spares_stock(self, part_id: str, station: str | None = None) -> dict:
+        """返回某备件在某站或合并口径的库存与缺件挂账。"""
+
+        with self._lock:
+            return self.spares.stock(part_id, station)
+
+    def spares_issue_order(
+        self,
+        part_id: str,
+        qty: float | None = None,
+        station: str | None = None,
+        lead_time_days: float | None = None,
+    ) -> dict:
+        """按当前建议下发并冻结一张采购单。"""
+
+        with self._lock:
+            result = self.spares.issue_order(part_id, qty, station, lead_time_days)
+            order = result["order"]
+            self._spares_event(
+                "order_issued",
+                "notice",
+                f"采购单 {order['order_id']} 已下发并冻结：{part_id} {order['qty']:g}",
+                order_id=order["order_id"],
+                part_id=part_id,
+                station=order["station"],
+                qty=order["qty"],
+                basis=result["basis_at_issue"],
+            )
+            return result
+
+    def spares_receive_order(
+        self, order_id: str, qty: float | None = None, station: str | None = None
+    ) -> dict:
+        """登记一笔到货，先补缺件挂账再回补库存。"""
+
+        with self._lock:
+            result = self.spares.receive_order(order_id, qty, station)
+            order = result["order"]
+            self._spares_event(
+                "order_received",
+                "notice",
+                f"采购单 {order_id} 到货 {result['received_now']:g}，状态 {order['status']}",
+                order_id=order_id,
+                part_id=order["part_id"],
+                qty=result["received_now"],
+                status=order["status"],
+                on_hand=result["stock"]["on_hand"],
+            )
+            return result
+
+    def spares_order_diff(self, order_id: str) -> dict:
+        """对照已下发采购单与重算建议，只给差异提示，不改单。"""
+
+        with self._lock:
+            return self.spares.order_diff(order_id)
+
+    def spares_orders(self, part_id: str | None = None, include_closed: bool = True) -> dict:
+        """列出采购单与到货进度。"""
+
+        with self._lock:
+            return {
+                "orders": self.spares.list_orders(part_id, include_closed=include_closed),
+                "arrivals": self.spares.arrivals(),
+            }
+
+    def spares_part_overview(self, part_id: str) -> dict:
+        """同一备件各站分开 + 合并的建议视图。"""
+
+        with self._lock:
+            return self.spares.part_overview(part_id)
+
+    def spares_overview(self) -> dict:
+        """全部备件的补货与到货总览。"""
+
+        with self._lock:
+            return self.spares.overview()
+
+    def spares_events(self, part_id: str | None = None, backfilled_only: bool = False) -> dict:
+        """查询更换事件（可只看补录）。"""
+
+        with self._lock:
+            return {"events": self.spares.events(part_id, backfilled_only=backfilled_only)}
+
+    def spares_snapshot(self) -> dict:
+        """返回备件台账完整快照。"""
+
+        with self._lock:
+            return self.spares.snapshot()
+
     def readiness(self) -> dict:
         """返回各簇就绪判据与联控链核对结果。"""
 
@@ -776,6 +979,7 @@ class Platform:
             "status": self.status(),
             "capacity": self.capacity().as_dict(),
             "quota": self.quota_snapshot(),
+            "spares": self.spares_snapshot(),
             "audit": self.audit_snapshot(),
             "mapping": self.rack_mapping(),
             "config": config_to_mapping(self.config),
@@ -804,5 +1008,6 @@ def build_platform(
             soc=resolved.soc,
             balance=resolved.balance,
             quota=resolved.quota,
+            spares=resolved.spares,
         )
     return Platform(config=resolved, clock=clock, rack_count=rack_count)

@@ -336,6 +336,45 @@ class QuotaLimits:
 
 
 @dataclass(frozen=True)
+class SparesLimits:
+    """备件消耗速率估计窗口、检修季判定与补货策略。"""
+
+    window_days: float = 90.0
+    cycle_days: float = 365.0
+    lead_time_days: float = 30.0
+    service_level_z: float = 1.28
+    target_coverage_days: float = 60.0
+    min_events: int = 4
+    season_ratio: float = 1.5
+    backfill_grace_days: float = 7.0
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any] | None = None) -> "SparesLimits":
+        values = section if isinstance(section, Mapping) else {}
+        limits = cls(
+            window_days=_number(values, "window_days", minimum=1.0) if "window_days" in values else 90.0,
+            cycle_days=_number(values, "cycle_days", minimum=1.0) if "cycle_days" in values else 365.0,
+            lead_time_days=_number(values, "lead_time_days", minimum=0.0) if "lead_time_days" in values else 30.0,
+            service_level_z=_number(values, "service_level_z", minimum=0.0) if "service_level_z" in values else 1.28,
+            target_coverage_days=(
+                _number(values, "target_coverage_days", minimum=1.0)
+                if "target_coverage_days" in values
+                else 60.0
+            ),
+            min_events=_integer(values, "min_events", minimum=1) if "min_events" in values else 4,
+            season_ratio=_number(values, "season_ratio", minimum=1.0) if "season_ratio" in values else 1.5,
+            backfill_grace_days=(
+                _number(values, "backfill_grace_days", minimum=0.0) if "backfill_grace_days" in values else 7.0
+            ),
+        )
+        if limits.window_days >= limits.cycle_days:
+            raise ConfigError("备件近窗口天数必须短于周期天数", component="config")
+        if limits.target_coverage_days < limits.lead_time_days:
+            raise ConfigError("备件目标覆盖天数不能短于采购到货周期", component="config")
+        return limits
+
+
+@dataclass(frozen=True)
 class StationConfig:
     """一份完整的电站配置。"""
 
@@ -350,6 +389,7 @@ class StationConfig:
     soc: SocLimits
     balance: BalanceLimits
     quota: QuotaLimits
+    spares: SparesLimits = SparesLimits()
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "StationConfig":
@@ -373,6 +413,7 @@ class StationConfig:
             soc=SocLimits.from_mapping(_section(limits, "soc")),
             balance=BalanceLimits.from_mapping(_section(limits, "balance")),
             quota=QuotaLimits.from_mapping(_section(limits, "quota")),
+            spares=SparesLimits.from_mapping(limits.get("spares")),
         )
 
 
@@ -403,6 +444,7 @@ def default_config() -> StationConfig:
         soc=SocLimits(280.0, 0.98, 7200.0, 3.0, 50.0),
         balance=BalanceLimits(25.0, 4.0, 2.0, 600.0, 2),
         quota=QuotaLimits(24.0, 2000.0, 2000.0, 1.2, 0.4),
+        spares=SparesLimits(),
     )
 
 
@@ -486,6 +528,16 @@ def config_to_mapping(cfg: StationConfig) -> dict:
                 "discharge_quota_kwh": cfg.quota.discharge_quota_kwh,
                 "tariff_peak": cfg.quota.tariff_peak,
                 "tariff_valley": cfg.quota.tariff_valley,
+            },
+            "spares": {
+                "window_days": cfg.spares.window_days,
+                "cycle_days": cfg.spares.cycle_days,
+                "lead_time_days": cfg.spares.lead_time_days,
+                "service_level_z": cfg.spares.service_level_z,
+                "target_coverage_days": cfg.spares.target_coverage_days,
+                "min_events": cfg.spares.min_events,
+                "season_ratio": cfg.spares.season_ratio,
+                "backfill_grace_days": cfg.spares.backfill_grace_days,
             },
         },
     }

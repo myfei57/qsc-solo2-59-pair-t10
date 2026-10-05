@@ -67,6 +67,15 @@ class Api:
         add("GET", "/api/soc", lambda params, body: self._platform.soc_snapshot())
         add("GET", "/api/balance", lambda params, body: self._platform.balance_snapshot())
         add("GET", "/api/quota", lambda params, body: self._platform.quota_snapshot())
+        add("GET", "/api/spares", lambda params, body: self._platform.spares_overview())
+        add("GET", "/api/spares/snapshot", lambda params, body: self._platform.spares_snapshot())
+        add("GET", "/api/spares/orders", self._spares_orders)
+        add("GET", "/api/spares/events", self._spares_events)
+        add("GET", "/api/spares/part/{part_id}", self._spares_part)
+        add("GET", "/api/spares/part/{part_id}/rate", self._spares_rate)
+        add("GET", "/api/spares/part/{part_id}/stock", self._spares_stock)
+        add("GET", "/api/spares/part/{part_id}/recommend", self._spares_recommend)
+        add("GET", "/api/spares/order/{order_id}/diff", self._spares_order_diff)
         add("GET", "/api/audit", self._audit)
         add("GET", "/api/audit/report", lambda params, body: self._platform.audit.report())
         add("GET", "/api/audit/operations", self._operations)
@@ -100,6 +109,12 @@ class Api:
         add("POST", "/api/disturb", self._disturb)
         add("POST", "/api/probe/pcs", self._probe_pcs)
         add("POST", "/api/probe/fault", self._probe_fault)
+        add("POST", "/api/spares/part", self._spares_register)
+        add("POST", "/api/spares/stock", self._spares_set_stock)
+        add("POST", "/api/spares/replacement", self._spares_replacement)
+        add("POST", "/api/spares/basis", self._spares_basis)
+        add("POST", "/api/spares/order", self._spares_issue_order)
+        add("POST", "/api/spares/order/{order_id}/receive", self._spares_receive_order)
 
     def routes(self) -> list[dict]:
         """返回接口清单，供自检与文档核对。"""
@@ -261,3 +276,97 @@ class Api:
 
     def _probe_fault(self, params: dict, body: dict) -> dict:
         return self._platform.concurrency_fault_probe(rounds=_as_int(body, "rounds", 16))
+
+    def _station_param(self, params: dict, body: dict) -> str | None:
+        station = params.get("station", body.get("station"))
+        return str(station) if station not in (None, "") else None
+
+    def _spares_part(self, params: dict, body: dict) -> dict:
+        return self._platform.spares_part_overview(str(params["part_id"]))
+
+    def _spares_rate(self, params: dict, body: dict) -> dict:
+        return self._platform.spares_rate(str(params["part_id"]), self._station_param(params, body))
+
+    def _spares_stock(self, params: dict, body: dict) -> dict:
+        return self._platform.spares_stock(str(params["part_id"]), self._station_param(params, body))
+
+    def _spares_recommend(self, params: dict, body: dict) -> dict:
+        lead = body.get("lead_time_days", params.get("lead_time_days"))
+        lead_days = float(lead) if lead not in (None, "") else None
+        return self._platform.spares_recommend(
+            str(params["part_id"]), self._station_param(params, body), lead_days
+        )
+
+    def _spares_order_diff(self, params: dict, body: dict) -> dict:
+        return self._platform.spares_order_diff(str(params["order_id"]))
+
+    def _spares_orders(self, params: dict, body: dict) -> dict:
+        part_id = params.get("part_id")
+        include_closed = str(params.get("include_closed", "true")).lower() not in ("0", "false", "no")
+        return self._platform.spares_orders(part_id if part_id else None, include_closed=include_closed)
+
+    def _spares_events(self, params: dict, body: dict) -> dict:
+        part_id = params.get("part_id")
+        backfilled = str(params.get("backfilled", "")).lower() in ("1", "true", "yes")
+        return self._platform.spares_events(part_id if part_id else None, backfilled_only=backfilled)
+
+    def _spares_register(self, params: dict, body: dict) -> dict:
+        part_id = str(body.get("part_id", "")).strip()
+        if not part_id:
+            raise StoreError("缺少必填字段 part_id", component="console")
+        return self._platform.spares_register_part(
+            part_id,
+            name=str(body["name"]) if body.get("name") else None,
+            unit=str(body.get("unit", "件")),
+            initial_stock=_as_float(body, "initial_stock", 0.0),
+            station=self._station_param(params, body),
+        )
+
+    def _spares_set_stock(self, params: dict, body: dict) -> dict:
+        part_id = str(body.get("part_id", "")).strip()
+        if not part_id:
+            raise StoreError("缺少必填字段 part_id", component="console")
+        return self._platform.spares_set_stock(
+            part_id,
+            qty=_as_float(body, "qty", 0.0),
+            station=self._station_param(params, body),
+        )
+
+    def _spares_replacement(self, params: dict, body: dict) -> dict:
+        part_id = str(body.get("part_id", "")).strip()
+        if not part_id:
+            raise StoreError("缺少必填字段 part_id", component="console")
+        ts = body.get("ts")
+        backfilled = body.get("backfilled")
+        return self._platform.spares_record_replacement(
+            part_id,
+            qty=_as_float(body, "qty", 1.0),
+            station=self._station_param(params, body),
+            ts=float(ts) if ts not in (None, "") else None,
+            backfilled=bool(backfilled) if backfilled is not None else None,
+            note=str(body.get("note", "")),
+        )
+
+    def _spares_basis(self, params: dict, body: dict) -> dict:
+        return self._platform.spares_set_basis(str(body.get("part_id", "")), str(body.get("basis", "auto")))
+
+    def _spares_issue_order(self, params: dict, body: dict) -> dict:
+        part_id = str(body.get("part_id", "")).strip()
+        if not part_id:
+            raise StoreError("缺少必填字段 part_id", component="console")
+        qty = body.get("qty")
+        lead = body.get("lead_time_days")
+        return self._platform.spares_issue_order(
+            part_id,
+            qty=float(qty) if qty not in (None, "") else None,
+            station=self._station_param(params, body),
+            lead_time_days=float(lead) if lead not in (None, "") else None,
+        )
+
+    def _spares_receive_order(self, params: dict, body: dict) -> dict:
+        qty = body.get("qty")
+        return self._platform.spares_receive_order(
+            str(params["order_id"]),
+            qty=float(qty) if qty not in (None, "") else None,
+            station=self._station_param(params, body),
+        )

@@ -106,6 +106,40 @@ def test_console_actions_and_errors(platform):
         server.stop()
 
 
+def test_console_spares_workflow(platform):
+    support.bring_online(platform)
+    server = ConsoleServer(platform, port=0)
+    base_url = server.start()
+    try:
+        code, created = _post(base_url, "/api/spares/part", {"part_id": "fan", "initial_stock": 2.0})
+        assert code == 200 and created["part"]["part_id"] == "fan"
+        code, _repl = _post(
+            base_url,
+            "/api/spares/replacement",
+            {"part_id": "fan", "qty": 3.0, "backfilled": True, "ts": platform.clock.now() - 86400.0},
+        )
+        assert code == 200
+        code, stock = _get(base_url, "/api/spares/part/fan/stock")
+        assert code == 200 and stock["on_hand"] == -1.0
+        code, rec = _get(base_url, "/api/spares/part/fan/recommend")
+        assert code == 200 and "min_stock" in rec and "suggest_qty" in rec
+        code, order = _post(base_url, "/api/spares/order", {"part_id": "fan", "qty": 2.0})
+        assert code == 200
+        order_id = order["order"]["order_id"]
+        code, diff = _get(base_url, f"/api/spares/order/{order_id}/diff")
+        assert code == 200 and diff["frozen"] is True and "message" in diff
+        code, received = _post(base_url, f"/api/spares/order/{order_id}/receive", {"qty": 2.0})
+        assert code == 200 and received["stock"]["on_hand"] == 1.0
+        code, overview = _get(base_url, "/api/spares")
+        assert code == 200 and overview["parts"][0]["part"]["part_id"] == "fan"
+        code, events = _get(base_url, "/api/spares/events?backfilled=true")
+        assert code == 200 and len(events["events"]) == 1
+        code, orders = _get(base_url, "/api/spares/orders")
+        assert code == 200 and orders["arrivals"]["closed_orders"] == 1
+    finally:
+        server.stop()
+
+
 def test_console_rejects_bad_numeric_parameter(platform):
     support.bring_online(platform)
     server = ConsoleServer(platform, port=0)
