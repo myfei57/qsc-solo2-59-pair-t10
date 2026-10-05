@@ -8,6 +8,7 @@
 ``status``   打印当前状态快照；
 ``config``   打印生效配置；
 ``alerts``   打印按最新编号路由后的告警；
+``spare``    打印备件补货总览与在途采购单；
 ``reset``    清掉落盘的平台计数。
 """
 
@@ -165,6 +166,20 @@ def _cmd_alerts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_spare(args: argparse.Namespace) -> int:
+    platform = _build(args)
+    payload = {
+        "snapshot": platform.spare_snapshot(),
+        "overview": platform.spare_overview(basis=args.basis)["overview"],
+        "orders": platform.spare_orders()["orders"],
+    }
+    if args.part:
+        payload["merged_plan"] = platform.spare_plan(args.part)
+        payload["stock"] = platform.spare_stock(args.part)
+    _dump(payload)
+    return 0
+
+
 def _cmd_reset(args: argparse.Namespace) -> int:
     platform = _build(args)
     _dump(platform.reset_state())
@@ -209,6 +224,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     alerts = sub.add_parser("alerts", help="打印路由后的告警", parents=[common])
     alerts.set_defaults(func=_cmd_alerts)
+
+    spare = sub.add_parser("spare", help="打印备件补货总览", parents=[common])
+    spare.add_argument("--part", help="只看某备件的合并建议与库存")
+    spare.add_argument("--basis", choices=("window", "cycle"), help="强制估计口径")
+    spare.set_defaults(func=_cmd_spare)
 
     reset = sub.add_parser("reset", help="清掉落盘的平台计数", parents=[common])
     reset.set_defaults(func=_cmd_reset)

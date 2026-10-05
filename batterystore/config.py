@@ -336,6 +336,37 @@ class QuotaLimits:
 
 
 @dataclass(frozen=True)
+class SpareLimits:
+    """备件消耗估计窗口、切换阈值与库存策略参数。
+
+    ``window_days`` 是"最近一个窗口"口径的长度，``cycle_days`` 是整个统计
+    周期长度；两种口径在检修集中月份差距明显，``switch_ratio`` 决定何时在两者
+    之间切换。
+    """
+
+    window_days: float
+    cycle_days: float
+    switch_ratio: float
+    service_level: float
+    review_days: float
+
+    @classmethod
+    def from_mapping(cls, section: Mapping[str, Any]) -> "SpareLimits":
+        limits = cls(
+            window_days=_number(section, "window_days", minimum=1.0),
+            cycle_days=_number(section, "cycle_days", minimum=1.0),
+            switch_ratio=_number(section, "switch_ratio", minimum=1.0),
+            service_level=_number(section, "service_level", minimum=0.5),
+            review_days=_number(section, "review_days", minimum=0.0),
+        )
+        if limits.window_days > limits.cycle_days:
+            raise ConfigError("最近窗口不能长于整个统计周期", component="config")
+        if limits.service_level >= 1.0:
+            raise ConfigError("服务水平必须小于 1", component="config")
+        return limits
+
+
+@dataclass(frozen=True)
 class StationConfig:
     """一份完整的电站配置。"""
 
@@ -350,6 +381,7 @@ class StationConfig:
     soc: SocLimits
     balance: BalanceLimits
     quota: QuotaLimits
+    spare: SpareLimits
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any]) -> "StationConfig":
@@ -373,6 +405,7 @@ class StationConfig:
             soc=SocLimits.from_mapping(_section(limits, "soc")),
             balance=BalanceLimits.from_mapping(_section(limits, "balance")),
             quota=QuotaLimits.from_mapping(_section(limits, "quota")),
+            spare=SpareLimits.from_mapping(_section(limits, "spare")),
         )
 
 
@@ -403,6 +436,7 @@ def default_config() -> StationConfig:
         soc=SocLimits(280.0, 0.98, 7200.0, 3.0, 50.0),
         balance=BalanceLimits(25.0, 4.0, 2.0, 600.0, 2),
         quota=QuotaLimits(24.0, 2000.0, 2000.0, 1.2, 0.4),
+        spare=SpareLimits(30.0, 180.0, 1.5, 0.95, 7.0),
     )
 
 
@@ -486,6 +520,13 @@ def config_to_mapping(cfg: StationConfig) -> dict:
                 "discharge_quota_kwh": cfg.quota.discharge_quota_kwh,
                 "tariff_peak": cfg.quota.tariff_peak,
                 "tariff_valley": cfg.quota.tariff_valley,
+            },
+            "spare": {
+                "window_days": cfg.spare.window_days,
+                "cycle_days": cfg.spare.cycle_days,
+                "switch_ratio": cfg.spare.switch_ratio,
+                "service_level": cfg.spare.service_level,
+                "review_days": cfg.spare.review_days,
             },
         },
     }

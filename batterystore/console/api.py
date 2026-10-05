@@ -67,6 +67,19 @@ class Api:
         add("GET", "/api/soc", lambda params, body: self._platform.soc_snapshot())
         add("GET", "/api/balance", lambda params, body: self._platform.balance_snapshot())
         add("GET", "/api/quota", lambda params, body: self._platform.quota_snapshot())
+        add("GET", "/api/spare", lambda params, body: self._platform.spare_snapshot())
+        add("GET", "/api/spare/overview", self._spare_overview)
+        add("GET", "/api/spare/parts", lambda params, body: {"parts": self._platform.spares.list_parts()})
+        add("GET", "/api/spare/stock", self._spare_stock)
+        add("GET", "/api/spare/plan/{part_id}", self._spare_plan)
+        add("GET", "/api/spare/events", self._spare_events)
+        add("GET", "/api/spare/orders", self._spare_orders)
+        add("GET", "/api/spare/order/{order_id}/diff", self._spare_order_diff)
+        add("POST", "/api/spare/parts", self._spare_register)
+        add("POST", "/api/spare/stock", self._spare_set_stock)
+        add("POST", "/api/spare/replacements", self._spare_replacement)
+        add("POST", "/api/spare/orders", self._spare_issue)
+        add("POST", "/api/spare/receive", self._spare_receive)
         add("GET", "/api/audit", self._audit)
         add("GET", "/api/audit/report", lambda params, body: self._platform.audit.report())
         add("GET", "/api/audit/operations", self._operations)
@@ -261,3 +274,87 @@ class Api:
 
     def _probe_fault(self, params: dict, body: dict) -> dict:
         return self._platform.concurrency_fault_probe(rounds=_as_int(body, "rounds", 16))
+
+    def _spare_station(self, source: dict) -> str | None:
+        station = source.get("station")
+        station = str(station) if station is not None else None
+        return station or None
+
+    def _spare_overview(self, params: dict, body: dict) -> dict:
+        basis = params.get("basis")
+        return self._platform.spare_overview(basis=str(basis) if basis else None)
+
+    def _spare_stock(self, params: dict, body: dict) -> dict:
+        part_id = params.get("part_id")
+        return self._platform.spare_stock(str(part_id) if part_id else None)
+
+    def _spare_plan(self, params: dict, body: dict) -> dict:
+        basis = params.get("basis")
+        return self._platform.spare_plan(
+            str(params.get("part_id", "")),
+            station=self._spare_station(params),
+            basis=str(basis) if basis else None,
+        )
+
+    def _spare_events(self, params: dict, body: dict) -> dict:
+        part_id = params.get("part_id")
+        return {
+            "events": self._platform.spare_events(
+                str(part_id) if part_id else None,
+                station=self._spare_station(params),
+                limit=_as_int(params, "limit", 200),
+            )
+        }
+
+    def _spare_orders(self, params: dict, body: dict) -> dict:
+        part_id = params.get("part_id")
+        return self._platform.spare_orders(str(part_id) if part_id else None)
+
+    def _spare_order_diff(self, params: dict, body: dict) -> dict:
+        return self._platform.spare_order_diff(str(params.get("order_id", "")))
+
+    def _spare_register(self, params: dict, body: dict) -> dict:
+        return self._platform.spare_register_part(
+            str(body.get("part_id", "")),
+            name=body.get("name"),
+            lead_days=float(body["lead_days"]) if body.get("lead_days") is not None else None,
+            min_order_qty=_as_int(body, "min_order_qty", 1),
+            lot_size=_as_int(body, "lot_size", 1),
+            initial_stock=_as_int(body, "initial_stock", 0),
+            station=self._spare_station(body) or "central",
+        )
+
+    def _spare_set_stock(self, params: dict, body: dict) -> dict:
+        return self._platform.spare_set_stock(
+            str(body.get("part_id", "")),
+            _as_int(body, "qty", 0),
+            station=self._spare_station(body) or "central",
+            note=str(body.get("note", "")),
+        )
+
+    def _spare_replacement(self, params: dict, body: dict) -> dict:
+        return self._platform.spare_record_replacement(
+            str(body.get("part_id", "")),
+            qty=_as_int(body, "qty", 1),
+            station=self._spare_station(body) or "central",
+            ts=float(body["ts"]) if body.get("ts") is not None else None,
+            recorded_ts=float(body["recorded_ts"]) if body.get("recorded_ts") is not None else None,
+            note=str(body.get("note", "")),
+        )
+
+    def _spare_issue(self, params: dict, body: dict) -> dict:
+        qty = body.get("qty")
+        return self._platform.spare_issue_order(
+            str(body.get("part_id", "")),
+            qty=int(qty) if qty is not None else None,
+            supplier=str(body.get("supplier", "")),
+            station=self._spare_station(body) or "central",
+        )
+
+    def _spare_receive(self, params: dict, body: dict) -> dict:
+        return self._platform.spare_receive_order(
+            str(body.get("order_id", "")),
+            _as_int(body, "qty", 1),
+            station=self._spare_station(body) or "central",
+            note=str(body.get("note", "")),
+        )

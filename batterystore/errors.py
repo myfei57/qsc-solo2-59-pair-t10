@@ -39,6 +39,10 @@ class QuotaError(StoreError):
     """充放电配额不足或跨周期记账失败。"""
 
 
+class InventoryError(StoreError):
+    """备件台账拒绝：未知备件、库存不足收货或补货数量非法。"""
+
+
 class StorageError(StoreError):
     """持久化读写失败。"""
 

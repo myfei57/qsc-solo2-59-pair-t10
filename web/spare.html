@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>备件库存与补货</title>
+  <style>
+    body { font-family: "Segoe UI", sans-serif; margin: 24px; color: #1c2430; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
+    th, td { border: 1px solid #d6dde6; padding: 6px 10px; text-align: left; }
+    th { background: #eef3f9; }
+    .shortage { color: #b91c1c; font-weight: 600; }
+    .reorder { color: #b45309; font-weight: 600; }
+    .overstock { color: #1d4ed8; }
+    .ok { color: #15803d; }
+    .muted { color: #66707d; font-size: 12px; }
+    label { margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <h1>备件库存与补货</h1>
+  <p class="muted" id="summary"></p>
+
+  <h2>合并补货总览（跨站）</h2>
+  <label>口径
+    <select id="basis">
+      <option value="">自动</option>
+      <option value="window">最近窗口</option>
+      <option value="cycle">全周期均值</option>
+    </select>
+  </label>
+  <table>
+    <thead><tr>
+      <th>备件</th><th>口径</th><th>日耗</th><th>最低库存</th><th>目标</th>
+      <th>在手</th><th>欠储</th><th>在途</th><th>建议采购</th><th>状态</th><th>说明</th>
+    </tr></thead>
+    <tbody id="overview"></tbody>
+  </table>
+
+  <h2>分站点库存</h2>
+  <table>
+    <thead><tr><th>备件</th><th>站点</th><th>在手</th><th>欠储</th><th>站点建议</th></tr></thead>
+    <tbody id="stations"></tbody>
+  </table>
+
+  <h2>采购单与到货</h2>
+  <table>
+    <thead><tr>
+      <th>单号</th><th>备件</th><th>下单量</th><th>已到</th><th>在途</th>
+      <th>预期到货</th><th>状态</th><th>差异提示</th>
+    </tr></thead>
+    <tbody id="orders"></tbody>
+  </table>
+
+  <script>
+    function fmtTime(ts) { return new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 19); }
+    async function getJson(path) { return (await fetch(path)).json(); }
+    async function load() {
+      const basis = document.getElementById("basis").value;
+      const snapshot = await getJson("/api/spare");
+      document.getElementById("summary").textContent =
+        `备件 ${snapshot.parts.length} 种，更换记录 ${snapshot.events} 条（补录 ${snapshot.backfilled_events} 条），` +
+        `在途单 ${snapshot.open_orders} 张，逾期 ${snapshot.overdue_orders} 张`;
+
+      const overview = await getJson("/api/spare/overview" + (basis ? `?basis=${basis}` : ""));
+      document.getElementById("overview").innerHTML = overview.overview.length
+        ? overview.overview.map((item) => {
+            const p = item.policy, r = item.rate;
+            return `<tr><td>${item.part_id}</td><td>${r.basis}</td><td>${r.rate_per_day}</td>` +
+              `<td>${p.min_stock}</td><td>${p.target_stock}</td><td>${p.on_hand}</td>` +
+              `<td class="${p.backlog ? "shortage" : ""}">${p.backlog}</td><td>${p.in_transit}</td>` +
+              `<td class="${p.suggested_qty ? "reorder" : ""}">${p.suggested_qty}</td>` +
+              `<td class="${p.status}">${p.status}</td><td class="muted">${p.reason}</td></tr>`;
+          }).join("")
+        : `<tr><td colspan="11">尚未登记备件</td></tr>`;
+
+      const stationRows = [];
+      for (const part of snapshot.parts) {
+        const stock = await getJson(`/api/spare/stock?part_id=${part.part_id}`);
+        for (const [station, cell] of Object.entries(stock[part.part_id].stations)) {
+          const plan = await getJson(`/api/spare/plan/${part.part_id}?station=${station}`);
+          stationRows.push(
+            `<tr><td>${part.part_id}</td><td>${station}</td><td>${cell.on_hand}</td>` +
+            `<td class="${cell.backlog ? "shortage" : ""}">${cell.backlog}</td>` +
+            `<td>${plan.policy.suggested_qty}（${plan.rate.basis}，最低 ${plan.policy.min_stock}）</td></tr>`);
+        }
+      }
+      document.getElementById("stations").innerHTML = stationRows.length
+        ? stationRows.join("") : `<tr><td colspan="5">暂无站点库存</td></tr>`;
+
+      const orders = await getJson("/api/spare/orders");
+      const diffs = await Promise.all(orders.orders.map((order) =>
+        getJson(`/api/spare/order/${order.order_id}/diff`)));
+      document.getElementById("orders").innerHTML = orders.orders.length
+        ? orders.orders.map((order, index) => {
+            const diff = diffs[index];
+            return `<tr><td>${order.order_id}</td><td>${order.part_id}</td><td>${order.qty}</td>` +
+              `<td>${order.received}</td><td>${order.in_transit}</td><td>${fmtTime(order.expected_ts)}</td>` +
+              `<td class="${order.status === "overdue" ? "reorder" : ""}">${order.status}</td>` +
+              `<td class="muted">${diff.message}</td></tr>`;
+          }).join("")
+        : `<tr><td colspan="8">暂无采购单</td></tr>`;
+    }
+    document.getElementById("basis").addEventListener("change", load);
+    load();
+    setInterval(load, 10000);
+  </script>
+</body>
+</html>

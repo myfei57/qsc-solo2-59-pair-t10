@@ -34,6 +34,7 @@ from .rack.mapping import RackMapping
 from .rack.pack import Pack
 from .rack.rack import Rack
 from .soc.soc import SocEstimator
+from .spare.manager import SparePartsManager
 from .store.journal import JsonlJournal
 from .store.jsonfile import JsonStore
 from .temp.temp import TempControl
@@ -106,6 +107,12 @@ class Platform:
         self.soc = SocEstimator(self.config.soc, self.bms.calibration)
         self.balancer = Balancer(self.config.balance)
         self.quota = QuotaLedger(self.config.quota)
+        self.spares = SparePartsManager(
+            self.config.spare,
+            self.clock,
+            store,
+            publish=lambda *args, **kwargs: self.bus.publish(Event.of(*args, **kwargs)),
+        )
 
         self._cycles = 0
         self._operations = 0
@@ -130,6 +137,7 @@ class Platform:
             ("station", "soc", "state-of-charge"),
             ("station", "balance", "cell-balancer"),
             ("station", "quota", "quota-ledger"),
+            ("station", "spare", "spare-parts"),
             ("station", "audit", "run-audit"),
         ):
             self.namespaces.register(area, device, kind)
@@ -737,6 +745,75 @@ class Platform:
     def quota_snapshot(self) -> dict:
         return self.quota.snapshot(self.clock.now()).as_dict()
 
+    def spare_register_part(self, *args, **kwargs) -> dict:
+        """登记备件，参数透传给备件管理器。"""
+
+        with self._lock:
+            return self.spares.register_part(*args, **kwargs)
+
+    def spare_set_stock(self, *args, **kwargs) -> dict:
+        """设定某站在手库存（盘点/初始化）。"""
+
+        with self._lock:
+            return self.spares.set_stock(*args, **kwargs)
+
+    def spare_record_replacement(self, *args, **kwargs) -> dict:
+        """登记一次备件更换（实时或补录）。"""
+
+        with self._lock:
+            return self.spares.record_replacement(*args, **kwargs)
+
+    def spare_events(self, *args, **kwargs) -> list[dict]:
+        """查询更换记录。"""
+
+        with self._lock:
+            return self.spares.list_events(*args, **kwargs)
+
+    def spare_stock(self, part_id: str | None = None) -> dict:
+        """按备件/站查库存。"""
+
+        with self._lock:
+            return self.spares.stock_view(part_id)
+
+    def spare_plan(self, part_id: str, station: str | None = None, basis: str | None = None) -> dict:
+        """单个备件在某站或跨站合并的补货建议。"""
+
+        with self._lock:
+            return self.spares.plan(part_id, station=station, basis=basis)
+
+    def spare_overview(self, basis: str | None = None) -> dict:
+        """全备件跨站合并的补货总览。"""
+
+        with self._lock:
+            return {"overview": self.spares.overview(basis=basis)}
+
+    def spare_issue_order(self, *args, **kwargs) -> dict:
+        """下发采购单（数量缺省取当前建议量），单据冻结。"""
+
+        with self._lock:
+            return self.spares.issue_order(*args, **kwargs)
+
+    def spare_receive_order(self, *args, **kwargs) -> dict:
+        """登记采购单到货。"""
+
+        with self._lock:
+            return self.spares.receive_order(*args, **kwargs)
+
+    def spare_orders(self, part_id: str | None = None) -> dict:
+        """采购单与到货状态。"""
+
+        with self._lock:
+            return {"orders": self.spares.list_orders(part_id)}
+
+    def spare_order_diff(self, order_id: str) -> dict:
+        """已下发采购单与重算建议的差异提示（不改单据）。"""
+
+        with self._lock:
+            return self.spares.order_diff(order_id)
+
+    def spare_snapshot(self) -> dict:
+        return self.spares.snapshot().as_dict()
+
     def audit_snapshot(self) -> dict:
         return self.audit.snapshot().as_dict()
 
@@ -776,6 +853,7 @@ class Platform:
             "status": self.status(),
             "capacity": self.capacity().as_dict(),
             "quota": self.quota_snapshot(),
+            "spare": self.spare_snapshot(),
             "audit": self.audit_snapshot(),
             "mapping": self.rack_mapping(),
             "config": config_to_mapping(self.config),
@@ -804,5 +882,6 @@ def build_platform(
             soc=resolved.soc,
             balance=resolved.balance,
             quota=resolved.quota,
+            spare=resolved.spare,
         )
     return Platform(config=resolved, clock=clock, rack_count=rack_count)

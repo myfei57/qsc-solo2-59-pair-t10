@@ -78,6 +78,13 @@
       "discharge_quota_kwh": 2000.0,
       "tariff_peak": 1.2,
       "tariff_valley": 0.4
+    },
+    "spare": {
+      "window_days": 30.0,
+      "cycle_days": 180.0,
+      "switch_ratio": 1.5,
+      "service_level": 0.95,
+      "review_days": 7.0
     }
   }
 }

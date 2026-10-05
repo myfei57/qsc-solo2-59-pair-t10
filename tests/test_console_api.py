@@ -34,7 +34,7 @@ def test_page_library_reports_pages(tmp_path):
     assert library.resolve("/api/status") is None
     assert library.exists() is True
     assert library.render("racks").startswith("<!DOCTYPE html>")
-    assert len(library.index()) == 4
+    assert len(library.index()) == 5
     try:
         library.path_of("bogus")
     except KeyError:

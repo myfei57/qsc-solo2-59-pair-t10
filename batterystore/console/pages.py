@@ -14,6 +14,7 @@ PAGES = {
     "pcs": "pcs.html",
     "power": "power.html",
     "alarms": "alarms.html",
+    "spare": "spare.html",
 }
 
 
